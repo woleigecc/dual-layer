@@ -34,3 +34,6 @@ desktop.ini
 
 # ── 旧版备份（本地留档，不进仓库）──
 backup/
+
+# 她的海马体（私密经历，绝不入库）
+memory/memory.json

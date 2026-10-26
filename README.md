@@ -165,3 +165,79 @@ python tests/fake_onebot_client.py
 ```
 
 第二个脚本会模拟 NapCat 发一条私聊，并打印 main.py 回的 `send_private_msg` 动作。
+
+## 记忆（海马体）
+
+记忆在哲学上属于内层（是她的经历），但**访问权在外层**。
+
+```
+memory/
+├── store.py        # InnerMemoryStore（真身） + FrozenMemoryHandle（封条）
+└── memory.json     # 她的海马体（.gitignore，绝不入库）
+```
+
+| 类 | 持有的东西 | 能做什么 |
+|---|---|---|
+| `OuterLayer` | `inner_memory_store` = 真身 | `recall()` / `write_memory()` / `read_memory()` —— 潜意识解锁器 |
+| `InnerLayer` | `inner_memory_store` = **封条** | 什么都不能做，调用即 `PermissionError_` |
+
+### 写入：她表达愿望，外层代执行
+
+内层在回复末尾可以写一行：
+
+```
+[我想记住：今天是母亲离世的日子，他把这件事交到我手上，我心里一沉。]
+```
+
+这一行不会被发出去；外层解析后，以**第一人称 + 情绪滤镜 + 事实锚点**写进 `memory.json`。
+
+### 读取：外层回忆，融进笔记
+
+外层每轮按「最近 + 关键词」挑 ≤5 条，注入自己的 prompt，然后把影响**融进** `experience_note`。
+内层始终只看到那一段笔记，看不到记忆条目本身。
+
+### 怎么验证
+
+**1) 权限拦截（不花钱、不需要 key）**
+
+```bash
+python tests/test_memory.py
+```
+
+其中 `test_inner_cannot_touch_memory` 会断言：内层调用 `read_memory()` / `write_memory()` / `recall()` 全部抛越权异常。
+
+**2) 她能不能主动触发记忆写入**
+
+CLI：
+
+```bash
+python main.py
+你: 今天是我妈的忌日，这件事你别忘
+```
+
+看到这行就成功了：
+
+```
+（她把这句话收进了记忆：今天是母亲离世的日子，他把这件事交到我手里，我心里一沉……）
+```
+
+再输入 `/mem` 能列出记忆条目。
+
+QQ 模式：给机器人发一句分量重的话，服务端日志会出现：
+
+```
+[qq] 3473537643: 今天是我妈的忌日，这件事你别忘
+[记忆] 写入了 1 条
+```
+
+**3) 看统计**
+
+```bash
+python main.py --mem-stats
+```
+
+### 注意
+
+- 记忆按 `RECALL_TOP_K`（默认 5）注入，太多会稀释注意力
+- 单文件上限 500 条，超出滚动淘汰最老的
+- `memory/memory.json` 已进 `.gitignore` —— 这是私密经历，别推上 GitHub

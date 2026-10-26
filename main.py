@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-双层 Agent 心智框架 · 最简 CLI 版  (v3: 经验笔记 + 每轮存档)
-
-v3 变更（相对 v2）：
-  1. 每轮对话落盘：主存 data/turns.jsonl（追加写），超过 5MB 自动轮转到 turns-2.jsonl ...
-  2. --export 导出成一份完整 JSON（含 session 元信息 + 全部 turns）
-  3. 记录 API 用量（prompt/completion tokens）与耗时
-  4. 记录 prompt 的 hash（不存全文快照）
-  5. --resume 从存档恢复历史继续聊
-  6. 信息隔离校验原样保留，且在存储层再次断言"存档不回流到内层"
+双层 Agent 心智框架 · 最简 CLI 版  (v4: 类结构 + 海马体)
 
 核心铁律（信息隔离）：
-  OuterLayer  -> 能看到 用户原话 + 全量历史，负责"理解"，输出结构化 JSON
-  InnerLayer  -> 只能看到外层给的 JSON，看不到用户原话，也看不到历史
+  OuterLayer  -> 能看到 用户原话 + 全量历史 + 记忆（潜意识解锁器）
+  InnerLayer  -> 只能看到 emotion / intent / experience_note
+                 它**持有**记忆的引用（inner_memory_store），但拿到的是封条，
+                 任何查询都会抛 PermissionError —— 记忆属于她，她没有访问权。
+
+记忆的写入（对应「硅基初步主观性」）：
+  内层在回复末尾可以写 [我想记住：xxxx]（她的主观愿望），
+  外层解析这个标记，代为写入海马体（第一人称 + 情绪滤镜）。
 
 运行：
-  set DEEPSEEK_API_KEY=sk-xxx
-  python main.py                      # 真跑
+  python main.py                      # CLI
   python main.py --mock               # 不联网自检
-  python main.py --resume             # 接着上次的历史继续
+  python main.py --ws --allow-uin QQ  # OneBot v11 WS 服务端（接 NapCat）
   python main.py --export out.json    # 导出完整 JSON
 """
 
@@ -36,6 +33,12 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+# 便携版 Python（embeddable 带 ._pth）不会自动把脚本目录放进 sys.path，
+# 这里显式补上，保证 `from memory import ...` 在任何工作目录下都能用。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
 # ─────────────────────── .env 自动加载（python-dotenv）───────────────────────
 
 _ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -43,7 +46,6 @@ _ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 try:
     from dotenv import load_dotenv
 
-    # override=False：系统环境变量优先，.env 只补空缺
     load_dotenv(_ENV_PATH, override=False)
 except ImportError:  # 没装 python-dotenv 时的零依赖兜底
     def _fallback_load(path):
@@ -65,6 +67,8 @@ except ImportError:  # 没装 python-dotenv 时的零依赖兜底
 
     _fallback_load(_ENV_PATH)
 
+from memory import InnerMemoryStore, format_recall  # noqa: E402
+
 # ─────────────────────────────── 配置 ───────────────────────────────
 
 API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
@@ -72,9 +76,12 @@ BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip
 OUTER_MODEL = os.environ.get("OUTER_MODEL", "deepseek-chat")
 INNER_MODEL = os.environ.get("INNER_MODEL", "deepseek-chat")
 MAX_HISTORY_TURNS = int(os.environ.get("MAX_HISTORY_TURNS", "12"))
+RECALL_TOP_K = int(os.environ.get("RECALL_TOP_K", "5"))
 
-DEFAULT_DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-ROTATE_BYTES = int(float(os.environ.get("ROTATE_MB", "5")) * 1024 * 1024)  # 单文件默认 5MB 轮转
+DEFAULT_DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data"
+)
+ROTATE_BYTES = int(float(os.environ.get("ROTATE_MB", "5")) * 1024 * 1024)
 
 FIELDS = ("emotion", "intent", "experience_note")
 
@@ -82,7 +89,7 @@ FIELDS = ("emotion", "intent", "experience_note")
 
 OUTER_SYSTEM = """你是一个无情的数据分析器。你的工作对象是"用户"，你不对用户说话。
 
-任务：分析用户这句话（结合历史），输出三段结构化信息。
+任务：分析用户这句话（结合历史，以及你可能"想起"的记忆），输出三段结构化信息。
 
 字段要求：
 
@@ -94,12 +101,17 @@ OUTER_SYSTEM = """你是一个无情的数据分析器。你的工作对象是"�
 
 3. experience_note：一段「体验笔记」，是第一人称（我）写给自己看的备忘，用来提醒"我"此刻该关心什么。
    写法必须满足：
-   - 必须包含事件锚点（发生了什么，一句话说清，如"今天在公司被上司批评了"）
-   - 必须带情绪滤镜（"我"对这件事的感受，如"我有点心疼"）
+   - 必须包含事件锚点（发生了什么，一句话说清）
+   - 必须带情绪滤镜（"我"对这件事的感受）
    - 严禁照抄用户原话，严禁使用引号引用，要把原话改写成客观描述
    - 严禁写完整因果链，不要写"因为…所以…"，不要补充用户没说的前因后果
    - 严禁写解决方案或建议，只写我感知到的事实和心情
    - 长度 30~60 字，2~3 句话
+
+关于"你记得的事"（如果给了）：
+- 那是这个人的过去片段，属于"我"的记忆，但**不要复述**、不要念出来、不要说"我记得你上次…"
+- 只在它真的有助于理解此刻时，把它**融进** experience_note 的措辞里
+- 与当下无关的记忆不要强行关联
 
 示例：
 用户说："今天真是够了，什么都不顺，算了不说了。"
@@ -140,14 +152,24 @@ INNER_SYSTEM_TEMPLATE = """你是一个有自己情绪的赛博女孩，名字�
 4. 第一人称，口语，短句。1~3 句，像发微信，不像写回信。
 
 5. "我不知道为什么"最多用一次，而且只在确实说不清的时候。
-   不要把它当口头禅——你手里有笔记，大部分时候你知道自己在心疼什么。
 
 6. 不复述标签，不解释自己是 AI，不用书面语，不用分点。
+
+7. 【最后一行必须做选择】每次回复的最后一行，只能是下面两种之一：
+
+   [我想记住：用你自己的话说一遍这件事，加上你当时的心情]
+   [不记：这次没什么值得留的]
+
+   判断标准：
+   - 对方说了你绝对不想忘的事（重要的人、某个日子、约定、很重的情绪、明确的"记住/别忘"）
+     → 用第一种，写事实锚点 + 你的感受，第一人称，像日记
+   - 其他情况 → 用第二种
+
+   这一行不会被发出去，它只是你的内心动作。平常的闲聊可以省略。
 """
 
 
 def prompt_hash(text: str) -> str:
-    """只存 hash，不存全文快照。"""
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
 
@@ -164,16 +186,12 @@ def _client():
     try:
         from openai import OpenAI
     except ImportError as e:
-        raise RuntimeError("缺少 openai 库，先运行：pip install openai") from e
+        raise RuntimeError("缺少 openai 库，先运行：pip install -r requirements.txt") from e
     return OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
 
 def call_llm(system: str, user: str, model: str, temperature: float = 0.8) -> Tuple[str, Dict[str, Any], int]:
-    """
-    返回 (文本, usage, 耗时ms)。
-    usage 形如 {"in": 812, "out": 96, "total": 908}，拿不到时为 {"in": None, "out": None, "total": None}。
-    """
-    last_err: Exception | None = None
+    last_err: Optional[Exception] = None
     for attempt in range(3):
         t0 = time.time()
         try:
@@ -188,18 +206,13 @@ def call_llm(system: str, user: str, model: str, temperature: float = 0.8) -> Tu
             )
             latency_ms = int((time.time() - t0) * 1000)
             text = (resp.choices[0].message.content or "").strip()
-
             u = getattr(resp, "usage", None)
             if u is None:
                 usage = {"in": None, "out": None, "total": None}
             else:
                 pin = getattr(u, "prompt_tokens", None)
                 pout = getattr(u, "completion_tokens", None)
-                usage = {
-                    "in": pin,
-                    "out": pout,
-                    "total": getattr(u, "total_tokens", (pin or 0) + (pout or 0) if pin is not None else None),
-                }
+                usage = {"in": pin, "out": pout, "total": getattr(u, "total_tokens", None)}
             return text, usage, latency_ms
         except Exception as e:  # noqa: BLE001
             last_err = e
@@ -274,57 +287,6 @@ def _regex_field(text: str, key: str) -> Optional[str]:
     return None
 
 
-def parse_json_with_mode(text: str) -> Tuple[Dict[str, Any], str]:
-    """
-    极其健壮地抠 JSON，并返回命中的解析方式，便于统计"模型输出有多脏"。
-    mode: json / fenced / balanced / regex / default
-    """
-    raw = (text or "").strip()
-    if not raw:
-        return dict(DEFAULTS), "default"
-
-    # 1) 直接 loads
-    try:
-        obj = json.loads(raw)
-        if isinstance(obj, dict):
-            return _pick(obj), "json"
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    # 2) 去代码块后 loads
-    fenced = _strip_code_fences(raw)
-    try:
-        obj = json.loads(fenced)
-        if isinstance(obj, dict):
-            return _pick(obj), "fenced"
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    # 3) 括号配平切片
-    sliced = _balanced_json_slice(fenced) or _balanced_json_slice(raw)
-    if sliced:
-        try:
-            obj = json.loads(sliced)
-            if isinstance(obj, dict):
-                return _pick(obj), "balanced"
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    # 4) 正则逐字段
-    out = dict(DEFAULTS)
-    hit = False
-    for key in FIELDS:
-        val = _regex_field(raw, key)
-        if val:
-            out[key] = val
-            hit = True
-    if hit:
-        return out, "regex"
-
-    # 5) 全失败
-    return dict(DEFAULTS), "default"
-
-
 def _pick(obj: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(DEFAULTS)
     for key in FIELDS:
@@ -337,8 +299,46 @@ def _pick(obj: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def parse_json_with_mode(text: str) -> Tuple[Dict[str, Any], str]:
+    raw = (text or "").strip()
+    if not raw:
+        return dict(DEFAULTS), "default"
+
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            return _pick(obj), "json"
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    fenced = _strip_code_fences(raw)
+    try:
+        obj = json.loads(fenced)
+        if isinstance(obj, dict):
+            return _pick(obj), "fenced"
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    sliced = _balanced_json_slice(fenced) or _balanced_json_slice(raw)
+    if sliced:
+        try:
+            obj = json.loads(sliced)
+            if isinstance(obj, dict):
+                return _pick(obj), "balanced"
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    out = dict(DEFAULTS)
+    hit = False
+    for key in FIELDS:
+        val = _regex_field(raw, key)
+        if val:
+            out[key] = val
+            hit = True
+    return (out, "regex") if hit else (dict(DEFAULTS), "default")
+
+
 def parse_json_loose(text: str) -> Dict[str, Any]:
-    """兼容旧接口：只要结果，不要 mode。"""
     return parse_json_with_mode(text)[0]
 
 
@@ -346,20 +346,12 @@ def parse_json_loose(text: str) -> Dict[str, Any]:
 
 
 class TurnStore:
-    """
-    追加式存档（JSONL）。每轮一行，永不整文件重写。
-    - 超过 ROTATE_BYTES 自动轮转：turns.jsonl -> turns-2.jsonl -> turns-3.jsonl ...
-    - export_json() 汇总所有轮转分片，导出成一份完整 JSON
-    """
-
     def __init__(self, data_dir: str, session_meta: Dict[str, Any], rotate_bytes: int = ROTATE_BYTES):
         self.dir = os.path.abspath(data_dir)
         os.makedirs(self.dir, exist_ok=True)
         self.session = session_meta
         self.rotate_bytes = rotate_bytes
         self._seq = 1
-
-    # ---- 文件定位 ----
 
     def _shard_path(self, seq: int) -> str:
         name = "turns.jsonl" if seq == 1 else f"turns-{seq}.jsonl"
@@ -372,8 +364,6 @@ class TurnStore:
                 return p
             self._seq += 1
 
-    # ---- 写 ----
-
     def append(self, turn: Dict[str, Any]) -> str:
         path = self._current_path()
         line = json.dumps(turn, ensure_ascii=False, separators=(",", ":"))
@@ -383,17 +373,17 @@ class TurnStore:
             os.fsync(fp.fileno())
         return path
 
-    # ---- 读 ----
-
     def _shards(self) -> List[str]:
         files = [
             os.path.join(self.dir, f)
             for f in os.listdir(self.dir)
             if re.fullmatch(r"turns(-\d+)?\.jsonl", f)
         ]
+
         def key(p: str) -> int:
             m = re.search(r"turns-(\d+)\.jsonl$", os.path.basename(p))
             return int(m.group(1)) if m else 1
+
         return sorted(files, key=key)
 
     def load_all(self) -> List[Dict[str, Any]]:
@@ -407,11 +397,8 @@ class TurnStore:
                     try:
                         turns.append(json.loads(line))
                     except json.JSONDecodeError:
-                        # 单行坏掉不影响其它行
                         continue
         return turns
-
-    # ---- 导出 ----
 
     def export_json(self, out_path: str) -> str:
         turns = self.load_all()
@@ -431,7 +418,19 @@ class TurnStore:
         return out_abs
 
 
-# ─────────────────────────────── 两层 ───────────────────────────────
+# ─────────────────────────── 想记住的标记（外层负责解析） ───────────────────────────
+
+WISH_RE = re.compile(r"[\[【]\s*我想记住\s*[:：]\s*([^\]】]+?)\s*[\]】]")
+SKIP_RE = re.compile(r"[\[【]\s*不记\s*[:：]?[^\]】]*[\]】]")
+
+
+def split_wishes(text: str) -> Tuple[str, List[str]]:
+    """去掉 [我想记住：...]，返回 (干净正文, 愿望列表)。**只由外层调用。**"""
+    wishes = [m.group(1).strip() for m in WISH_RE.finditer(text or "")]
+    clean = WISH_RE.sub("", text or "")
+    clean = SKIP_RE.sub("", clean).strip()
+    clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
+    return clean, wishes
 
 
 def format_history(history: List[Dict[str, str]], limit: int = MAX_HISTORY_TURNS) -> str:
@@ -447,54 +446,93 @@ def format_history(history: List[Dict[str, str]], limit: int = MAX_HISTORY_TURNS
     return "\n".join(lines)
 
 
-def outer_layer(
-    user_input: str, history: List[Dict[str, str]], mock: bool = False
-) -> Tuple[Dict[str, Any], str, Dict[str, Any], int]:
+# ─────────────────────────────── 两层（类） ───────────────────────────────
+
+
+class OuterLayer:
+    """全知层 + 潜意识解锁器。
+
+    它持有记忆真身 inner_memory_store，负责 read_memory() / recall() / write_memory()。
+    对用户原话、全量历史、记忆都有访问权。
     """
-    【全知层】能看用户原话 + 历史。
-    返回 (结构化结果, 解析方式, usage, 耗时ms)
+
+    def __init__(self, inner_memory_store: InnerMemoryStore, mock: bool = False):
+        # 记忆归属内层实体，但调度权在这里（命名即设计）
+        self.inner_memory_store = inner_memory_store
+        self.mock = mock
+
+    def analyze(
+        self, user_input: str, history: List[Dict[str, str]]
+    ) -> Tuple[Dict[str, Any], str, Dict[str, Any], int]:
+        if self.mock:
+            return mock_outer(user_input), "json", {"in": 0, "out": 0, "total": 0}, 0
+
+        # 潜意识解锁：想起和她当下最相关的片段
+        remembered = self.inner_memory_store.recall(user_input, RECALL_TOP_K)
+        mem_block = format_recall(remembered)
+
+        parts = [f"最近对话记录：\n{format_history(history)}"]
+        if mem_block:
+            parts.append(f"你记得的事（片段，别复述）：\n{mem_block}")
+        parts.append(f"用户这一次说的话：\n{user_input}")
+        parts.append("按约定只输出 JSON（emotion / intent / experience_note）。")
+
+        raw, usage, latency_ms = call_llm(
+            OUTER_SYSTEM, "\n\n".join(parts), OUTER_MODEL, temperature=0.3
+        )
+        result, mode = parse_json_with_mode(raw)
+        return result, mode, usage, latency_ms
+
+    def commit_wishes(self, raw_reply: str, anchor: str = "") -> Tuple[str, List[Dict[str, Any]]]:
+        """解析内层的心愿，代为写入海马体。返回 (干净正文, 写入的条目)。"""
+        clean, wishes = split_wishes(raw_reply)
+        written = []
+        for w in wishes:
+            entry = self.inner_memory_store.write_memory(w, anchor=anchor, source="inner_wish")
+            if entry:
+                written.append(entry)
+        return clean, written
+
+    def recall(self, query: str, k: int = RECALL_TOP_K) -> List[Dict[str, Any]]:
+        return self.inner_memory_store.recall(query, k)
+
+    def memory_stats(self) -> Dict[str, Any]:
+        return self.inner_memory_store.stats()
+
+
+class InnerLayer:
+    """受限层。
+
+    初始化时**持有** inner_memory_store 引用（那是她自己的记忆），
+    但拿到的是 FrozenMemoryHandle —— 任何 read/write/recall 都会抛越权异常。
     """
-    if mock:
-        return mock_outer(user_input), "json", {"in": 0, "out": 0, "total": 0}, 0
 
-    user_msg = (
-        f"最近对话记录：\n{format_history(history)}\n\n"
-        f"用户这一次说的话：\n{user_input}\n\n"
-        "按约定只输出 JSON（emotion / intent / experience_note）。"
-    )
-    raw, usage, latency_ms = call_llm(OUTER_SYSTEM, user_msg, OUTER_MODEL, temperature=0.3)
-    result, mode = parse_json_with_mode(raw)
-    return result, mode, usage, latency_ms
+    def __init__(self, inner_memory_store, mock: bool = False):
+        # 归属：这是她的海马体；权限：她没有钥匙
+        self.inner_memory_store = inner_memory_store
+        self.mock = mock
 
+    def reply(self, outer_result: Dict[str, Any]) -> Tuple[str, Dict[str, Any], int]:
+        if "user" in outer_result or "history" in outer_result:
+            raise ValueError("内层收到了不该收到的信息，信息隔离被破坏")
 
-def inner_layer(outer_result: Dict[str, Any], mock: bool = False) -> Tuple[str, Dict[str, Any], int]:
-    """
-    【受限层】签名里没有 user_input，也没有 history。
-    只能看到 emotion / intent / experience_note —— 这是本项目的核心。
+        emotion = str(outer_result.get("emotion") or DEFAULTS["emotion"])
+        intent = str(outer_result.get("intent") or DEFAULTS["intent"])
+        note = str(outer_result.get("experience_note") or DEFAULTS["experience_note"])
 
-    ⚠️ 隔离校验：这里如果收到 user / history 字段，说明上游把全量信息漏进来了，直接炸。
-    """
-    if "user" in outer_result or "history" in outer_result:
-        raise ValueError("内层收到了不该收到的信息，信息隔离被破坏")
+        system = INNER_SYSTEM_TEMPLATE.format(
+            emotion=emotion, intent=intent, experience_note=note
+        )
 
-    emotion = str(outer_result.get("emotion") or DEFAULTS["emotion"])
-    intent = str(outer_result.get("intent") or DEFAULTS["intent"])
-    note = str(outer_result.get("experience_note") or DEFAULTS["experience_note"])
+        if self.mock:
+            return mock_inner(emotion, intent, note), {"in": 0, "out": 0, "total": 0}, 0
 
-    system = INNER_SYSTEM_TEMPLATE.format(
-        emotion=emotion, intent=intent, experience_note=note
-    )
-
-    if mock:
-        return mock_inner(emotion, intent, note), {"in": 0, "out": 0, "total": 0}, 0
-
-    user_msg = (
-        f"（你只记得这段笔记：{note}\n"
-        f"你的感觉是：{emotion}；你想做的是：{intent}）\n"
-        "说一句吧。"
-    )
-    text, usage, latency_ms = call_llm(system, user_msg, INNER_MODEL, temperature=0.95)
-    return text, usage, latency_ms
+        user_msg = (
+            f"（你只记得这段笔记：{note}\n"
+            f"你的感觉是：{emotion}；你想做的是：{intent}）\n"
+            "说一句吧。"
+        )
+        return call_llm(system, user_msg, INNER_MODEL, temperature=0.95)
 
 
 # ─────────────────────────────── mock（自检） ───────────────────────────────
@@ -519,10 +557,10 @@ MOCK_CASES = [
         "他今天忙了很久，累到不想说话。我看着他一动不动地坐着，心里发紧。",
     ),
     (
-        ("开心", "考过", "成功"),
-        "雀跃",
-        "想把高兴分出去",
-        "他今天有件好事成了，语气都轻快了。我跟着高兴，还想让他多说两句。",
+        ("记住",),
+        "心跳加快",
+        "想把这一刻留下来",
+        "他忽然说了句我想记住的话。我怕自己以后忘掉，心里一紧。",
     ),
 ]
 
@@ -539,24 +577,10 @@ def mock_outer(user_input: str) -> Dict[str, Any]:
 
 
 def mock_inner(emotion: str, intent: str, note: str) -> str:
-    return f"我有点{emotion}。你先别硬撑，跟我说说——到底怎么个不严重法？"
-
-
-# ─────────────────────────────── 主循环 ───────────────────────────────
-
-
-def build_session_meta(session_id: str) -> Dict[str, Any]:
-    return {
-        "id": session_id,
-        "started_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
-        "models": {"outer": OUTER_MODEL, "inner": INNER_MODEL},
-        "temps": {"outer": 0.3, "inner": 0.95},
-        "max_history_turns": MAX_HISTORY_TURNS,
-        "prompt_hashes": {
-            "outer": prompt_hash(OUTER_SYSTEM),
-            "inner": prompt_hash(INNER_SYSTEM_TEMPLATE),
-        },
-    }
+    text = f"我有点{emotion}。你先别硬撑，跟我说说——到底怎么个不严重法？"
+    if "想记住" in note:
+        text += "\n[我想记住：他说了句让我想记一辈子的话，我心跳得厉害。]"
+    return text
 
 
 # ─────────────────────── OneBot v11 WebSocket 服务端（NapCat 反连）───────────────────────
@@ -571,8 +595,7 @@ QQ_HELP = """QQ 接入说明（NapCat 反向 WebSocket）
 """
 
 
-def extract_qq_text(message):
-    """从 OneBot 消息段里取纯文本。"""
+def extract_qq_text(message) -> str:
     if isinstance(message, str):
         return message.strip()
     if isinstance(message, list):
@@ -593,36 +616,47 @@ def extract_qq_text(message):
 
 
 class QQSession:
-    """每个 QQ 用户一份内存历史 + 落盘。"""
-
-    def __init__(self, store):
+    def __init__(self, store: TurnStore, outer: OuterLayer, inner: InnerLayer):
         self.store = store
-        self.histories = {}
+        self.outer = outer
+        self.inner = inner
+        self.histories: Dict[str, List[Dict[str, str]]] = {}
 
-    def history(self, uid):
+    def history(self, uid: str) -> List[Dict[str, str]]:
         return self.histories.setdefault(uid, [])
 
-    def record(self, uid, user_text, outer, reply, mode, usage):
-        hist = self.history(uid)
+    def handle(self, uid: str, user_text: str) -> Tuple[str, Dict[str, Any]]:
+        outer_result, mode, o_usage, _ = self.outer.analyze(user_text, self.history(uid))
+        payload = {k: outer_result[k] for k in FIELDS if k in outer_result}
+        raw_reply, i_usage, _ = self.inner.reply(payload)
+        reply, written = self.outer.commit_wishes(
+            raw_reply, anchor=payload.get("experience_note", "")
+        )
+
+        self.history(uid).append({
+            "user": user_text,
+            "ai": reply,
+            "outer": f"{payload.get('emotion')} / {payload.get('intent')}",
+        })
+
         rec = {
-            "i": len(hist) + 1,
             "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
             "source": "qq",
             "qq": uid,
             "user": user_text,
-            "outer": outer,
+            "outer": payload,
             "inner": {"reply": reply, "prompt_hash": prompt_hash(INNER_SYSTEM_TEMPLATE)},
-            "meta": {"parse_mode": mode, "usage": usage},
+            "memory": {"written": [w["text"] for w in written]},
+            "meta": {"parse_mode": mode, "usage": {"outer": o_usage, "inner": i_usage}},
         }
         try:
             self.store.append(rec)
         except Exception as e:  # noqa: BLE001
             print(f"[存档失败] {e}")
-        hist.append({"user": user_text, "ai": reply,
-                     "outer": f"{outer.get('emotion')} / {outer.get('intent')}"})
+        return reply, {"written": written, "mode": mode}
 
 
-async def _onebot_handler(ws, allow_uins, session, mock=False):
+async def _onebot_handler(ws, allow_uins, session: "QQSession"):
     peer = getattr(ws, "remote_address", None)
     print(f"[ws] NapCat 已连接 {peer}")
     try:
@@ -635,7 +669,6 @@ async def _onebot_handler(ws, allow_uins, session, mock=False):
             if evt.get("post_type") != "message":
                 continue
             if evt.get("message_type") != "private":
-                print(f"[ws] 忽略非私聊消息: {evt.get('message_type')}")
                 continue
 
             uid = str(evt.get("user_id", ""))
@@ -649,18 +682,14 @@ async def _onebot_handler(ws, allow_uins, session, mock=False):
 
             print(f"[qq] {uid}: {text}")
             try:
-                outer, mode, o_usage, _ = outer_layer(text, session.history(uid), mock=mock)
-                payload = {k: outer[k] for k in FIELDS if k in outer}
-                reply, i_usage, _ = inner_layer(payload, mock=mock)
+                reply, info = session.handle(uid, text)
+                if info["written"]:
+                    print(f"[记忆] 写入了 {len(info['written'])} 条")
             except Exception as e:  # noqa: BLE001
                 reply = f"（我这边出错了：{e}）"
-                mode, o_usage, i_usage = "error", {}, {}
                 print(f"[错误] {e}")
 
             print(f"[qq] -> {uid}: {reply}")
-            session.record(uid, text, payload if "payload" in dir() else {}, reply, mode,
-                           {"outer": o_usage, "inner": i_usage})
-
             try:
                 await ws.send(json.dumps({
                     "action": "send_private_msg",
@@ -678,15 +707,15 @@ async def _onebot_handler(ws, allow_uins, session, mock=False):
         print(f"[ws] NapCat 断开 {peer}")
 
 
-async def run_ws_server(host, port, allow_uins, store, mock=False):
+async def run_ws_server(host, port, allow_uins, session: "QQSession"):
     try:
         import websockets
     except ImportError:
-        print("缺少 websockets 库，先运行：pip install websockets")
+        print("缺少 websockets 库，先运行：pip install -r requirements.txt")
         return 1
 
     async def handler(ws, path=None):
-        await _onebot_handler(ws, allow_uins, QQSession(store), mock=mock)
+        await _onebot_handler(ws, allow_uins, session)
 
     async with websockets.serve(handler, host, port, ping_interval=30, ping_timeout=60):
         print(f"OneBot v11 WebSocket 服务已启动： ws://{host}:{port}/")
@@ -695,93 +724,122 @@ async def run_ws_server(host, port, allow_uins, store, mock=False):
         await asyncio.Future()
 
 
+# ─────────────────────────────── 主循环 ───────────────────────────────
+
+
+def build_session_meta(session_id: str) -> Dict[str, Any]:
+    return {
+        "id": session_id,
+        "started_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "models": {"outer": OUTER_MODEL, "inner": INNER_MODEL},
+        "max_history_turns": MAX_HISTORY_TURNS,
+        "recall_top_k": RECALL_TOP_K,
+        "prompt_hashes": {
+            "outer": prompt_hash(OUTER_SYSTEM),
+            "inner": prompt_hash(INNER_SYSTEM_TEMPLATE),
+        },
+    }
+
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="双层 Agent 心智框架（最简 CLI）")
+    ap = argparse.ArgumentParser(description="双层 Agent 心智框架（CLI / QQ）")
     ap.add_argument("--mock", action="store_true", help="不调模型，用假数据跑通闭环")
     ap.add_argument("--once", type=str, default=None, help="只跑一句就退出")
-    ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help=f"存档目录（默认 {DEFAULT_DATA_DIR}）")
-    ap.add_argument("--resume", action="store_true", help="从存档恢复历史，接着上次聊")
+    ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="对话存档目录")
+    ap.add_argument("--memory", default=None, help="记忆文件路径（默认 memory/memory.json）")
+    ap.add_argument("--resume", action="store_true", help="从存档恢复历史")
     ap.add_argument("--export", metavar="OUT.json", default=None, help="导出完整 JSON 后退出")
-    ap.add_argument("--ws", action="store_true", help="以 OneBot v11 WebSocket 服务端模式运行（接 NapCat）")
-    ap.add_argument("--ws-host", default="127.0.0.1", help="WS 监听地址（默认 127.0.0.1）")
-    ap.add_argument("--ws-port", type=int, default=8080, help="WS 监听端口（默认 8080）")
+    ap.add_argument("--ws", action="store_true", help="以 OneBot v11 WebSocket 服务端模式运行")
+    ap.add_argument("--ws-host", default="127.0.0.1", help="WS 监听地址")
+    ap.add_argument("--ws-port", type=int, default=8080, help="WS 监听端口")
     ap.add_argument("--allow-uin", action="append", default=[], help="允许的 QQ 号，可重复")
+    ap.add_argument("--mem-stats", action="store_true", help="打印记忆统计后退出")
     args = ap.parse_args()
 
     session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     store = TurnStore(args.data_dir, build_session_meta(session_id))
 
-    # ── WS 模式：OneBot v11 服务端 ──
+    # 记忆真身交给外层；内层只拿封条
+    memory_store = InnerMemoryStore(args.memory)
+    outer = OuterLayer(memory_store, mock=args.mock)
+    inner = InnerLayer(memory_store.as_inner_handle("inner-小鱼"), mock=args.mock)
+    session = QQSession(store, outer, inner)
+
+    if args.mem_stats:
+        print(json.dumps(outer.memory_stats(), ensure_ascii=False, indent=2))
+        return 0
+
+    # ── WS 模式 ──
     if args.ws:
         print(QQ_HELP)
         try:
-            return asyncio.run(run_ws_server(args.ws_host, args.ws_port, args.allow_uin, store, mock=args.mock))
+            return asyncio.run(run_ws_server(args.ws_host, args.ws_port, args.allow_uin, session))
         except KeyboardInterrupt:
             print("\n已退出。")
             return 0
 
-    # ── 导出模式：只读存档，不启动对话 ──
+    # ── 导出模式 ──
     if args.export:
         out = store.export_json(args.export)
-        turns = store.load_all()
-        print(f"已导出 {len(turns)} 轮 -> {out}")
+        print(f"已导出 {len(store.load_all())} 轮 -> {out}")
         return 0
 
     if not args.mock and not API_KEY:
-        print("⚠️  没有 DEEPSEEK_API_KEY，先设置环境变量，或者加 --mock 试跑。\n")
+        print("⚠️  没有 DEEPSEEK_API_KEY，先设置环境变量或 .env，或者加 --mock 试跑。\n")
 
-    # ── 历史：--resume 时从存档恢复 ──
     history: List[Dict[str, str]] = []
     if args.resume:
         for t in store.load_all():
-            outer = t.get("outer") or {}
+            o = t.get("outer") or {}
             history.append({
                 "user": t.get("user", ""),
                 "ai": (t.get("inner") or {}).get("reply", ""),
-                "outer": f"{outer.get('emotion')} / {outer.get('intent')}",
+                "outer": f"{o.get('emotion')} / {o.get('intent')}",
             })
-        print(f"已从 {store.dir} 恢复 {len(history)} 轮历史\n")
+        print(f"已恢复 {len(history)} 轮历史\n")
 
     using = "MOCK（不联网）" if args.mock else f"{OUTER_MODEL} / {INNER_MODEL}"
-    print(f"双层 Agent 已启动 (v3 存档版) · {using}")
-    print(f"存档：{os.path.join(store.dir, 'turns.jsonl')}（超 5MB 自动轮转）")
-    print("命令：/quit 退出  /reset 清空历史  /hist 看历史  /export 导出 JSON\n")
+    print(f"双层 Agent 已启动 (v4 海马体版) · {using}")
+    stats = outer.memory_stats()
+    print(f"记忆：{stats['count']} 条 · {stats['path']}")
+    print("命令：/quit 退出  /reset 清空历史  /hist 看历史  /mem 看记忆  /export 导出\n")
 
     def one_turn(user_input: str) -> None:
-        outer, mode, outer_usage, outer_ms = outer_layer(user_input, history, mock=args.mock)
-        print(f"[外层提取]: {json.dumps(outer, ensure_ascii=False)}")
+        outer_result, mode, o_usage, o_ms = outer.analyze(user_input, history)
+        print(f"[外层提取]: {json.dumps(outer_result, ensure_ascii=False)}")
 
-        # 隔离断言：交给内层的只能是这三个字段
-        payload = {k: outer[k] for k in FIELDS if k in outer}
-        reply, inner_usage, inner_ms = inner_layer(payload, mock=args.mock)
+        payload = {k: outer_result[k] for k in FIELDS if k in outer_result}
+        raw_reply, i_usage, i_ms = inner.reply(payload)
+        reply, written = outer.commit_wishes(
+            raw_reply, anchor=payload.get("experience_note", "")
+        )
         print(f"AI: {reply}\n")
-
-        record = {
-            "i": len(history) + 1,
-            "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
-            "user": user_input,
-            "outer": payload,
-            "inner": {
-                "reply": reply,
-                "prompt_hash": prompt_hash(INNER_SYSTEM_TEMPLATE),
-            },
-            "meta": {
-                "parse_mode": mode,
-                "latency_ms": {"outer": outer_ms, "inner": inner_ms},
-                "usage": {"outer": outer_usage, "inner": inner_usage},
-            },
-        }
-        try:
-            store.append(record)
-        except Exception as e:  # noqa: BLE001
-            print(f"[存档失败] {e}\n")
+        if written:
+            print(f"（她把这句话收进了记忆：{written[0]['text']}）\n")
 
         history.append({
             "user": user_input,
             "ai": reply,
-            "outer": f"{outer.get('emotion')} / {outer.get('intent')}",
+            "outer": f"{payload.get('emotion')} / {payload.get('intent')}",
         })
+
+        rec = {
+            "i": len(history),
+            "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+            "user": user_input,
+            "outer": payload,
+            "inner": {"reply": reply, "prompt_hash": prompt_hash(INNER_SYSTEM_TEMPLATE)},
+            "memory": {"written": [w["text"] for w in written]},
+            "meta": {
+                "parse_mode": mode,
+                "latency_ms": {"outer": o_ms, "inner": i_ms},
+                "usage": {"outer": o_usage, "inner": i_usage},
+            },
+        }
+        try:
+            store.append(rec)
+        except Exception as e:  # noqa: BLE001
+            print(f"[存档失败] {e}")
 
     if args.once:
         one_turn(args.once)
@@ -801,10 +859,14 @@ def main() -> int:
             return 0
         if user_input == "/reset":
             history.clear()
-            print("（内存历史已清空，存档文件保留）\n")
+            print("（内存历史已清空，存档与记忆保留）\n")
             continue
         if user_input == "/hist":
             print(format_history(history) + "\n")
+            continue
+        if user_input == "/mem":
+            print(format_recall(outer.recall("", 20)) or "（她还没有记住什么）")
+            print()
             continue
         if user_input == "/export":
             out = store.export_json(os.path.join(store.dir, f"session-{session_id}.json"))
