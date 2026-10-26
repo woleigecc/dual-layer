@@ -61,9 +61,9 @@
 *   **职责**：仅接收外层压缩后的体验碎片，以第一人称输出带情绪的表达。
 *   **涌现结果**：它的困惑、敏感、莫名情绪，是信息受限自然涌现的结果。
 
-<img width="1824" height="818" alt="file" src="https://github.com/user-attachments/assets/8a143d4c-6347-4f0c-b7bd-1ea8e8f21f47" />
-<img width="1797" height="1001" alt="file" src="https://github.com/user-attachments/assets/c21ab925-c00c-4fbb-a41d-9785e490fe93" />
-<img width="1824" height="1053" alt="file" src="https://github.com/user-attachments/assets/da84e8e1-898e-4cd5-8217-80a0c24c21a3" />
+![记忆的新陈代谢：打分 / 回忆加权 / 淘汰保护](docs/memory-lifecycle.png)
+![类结构与权限拦截：FrozenMemoryHandle](docs/class-diagram.png)
+![整体架构：外层全知，内层受限](docs/architecture.png)
 
 
 ---
@@ -97,6 +97,37 @@ pip install -r requirements.txt
 python main.py
 # 或者接入 NapCat 后启动 WebSocket 模式
 ```
+
+### 3. 零成本体验（不需要 API Key）
+
+```bash
+python main.py --mock
+```
+
+用内置假数据跑通整条链路，先感受「外层提取 → 内层受限回复」是什么效果。
+
+---
+
+## 🧪 测试
+
+三组测试，全部**不需要 API Key，也不需要联网**：
+
+```bash
+python tests/test_parse.py     # JSON 兜底解析：9 种脏输出
+python tests/test_memory.py    # 记忆归属 + 权重奖励 + 淘汰保护：15 个
+python tests/test_prompt.py    # 防幻觉硬约束是否还在：6 个
+```
+
+其中最关键的一条——它证明「内层碰不到记忆」不是口号，而是会抛异常的代码：
+
+```python
+def test_inner_cannot_touch_memory():
+    inner = InnerLayer(store.as_inner_handle())
+    assert inner.inner_memory_store is not None   # 引用在手上（归属）
+    inner.inner_memory_store.read_memory()        # 必须抛 PermissionError_
+```
+
+> 后续可以加 CI（GitHub Actions）自动跑这三组测试。
 
 ---
 
