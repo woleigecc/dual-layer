@@ -1,243 +1,108 @@
-# 双层 Agent 心智框架 · 最简 CLI
+# 硅基初步主观性｜双层 Agent 心智框架
+> Dual-Layer Agent Model for Silicon-based Initial Subjectivity
+> **当前状态**：早期 MVP (Alpha) · 已接入 QQ · 已实现跨天记忆
 
-通过**信息隔离**让内层模型只能说"我觉得……"而说不出完整原因，从而摆脱全知全能的表演感。
+## 💡 一句话简介
+当前绝大多数 AI 陪伴属于**「全知表演范式」**：模型持有全部历史、记忆与状态，它的茫然、遗忘、情绪都是在掌握全部因果信息下的精算表演。
+本项目提出一条反向路径：通过**潜意识（外层 Agent）与显意识（内层 Agent）的刚性信息隔离**，主动构造可控的认知盲区。角色的模糊情绪、说不清来由的感受、有限的自我内省，来自信息流本身的残缺，而不是提示词下达的表演任务。
 
-## 目录结构
+> “在这套设计里：残缺不是 Bug，而是心智设计的核心。”
 
-```
-dual-layer/
-├── main.py            # 全部逻辑（外层 / 内层 / 健壮 JSON / 主循环 / 存档）
-├── requirements.txt   # 依赖清单
-├── .env.example       # 环境变量模板（复制成 .env 用）
-├── tests/             # JSON 解析器测试
-├── LICENSE            # MIT
-└── README.md          # 本文件
-```
+---
 
-单文件跑通，不接数据库、不接 QQ、不接任何框架。
+## 🔍 为什么我们需要它？（痛点直击）
+市面上的 AI 陪伴很容易让人瞬间出戏。因为当你说“别烦我”时，全知全能的 AI 知道你是被老板骂了才烦躁，它会完美地说：“抱歉，那你好好休息。”
+**这是客服的完美，不是人类的真实。**
 
-## 安装
+人类的主观体验，建立在“有限的信息”之上。我们经常不知道情绪从何而来，会患得患失，会因为被推开而感到“被扎疼”。本框架试图通过物理代码拦截，逼迫大模型涌现出这种**「有限内省」**。
 
+---
+
+## 🎬 现象级对话对比（我的 AI vs 市面 AI）
+
+在这个架构下，AI 不再给出“最优解”，而是给出“情绪解”。
+
+### 场景一：面对用户的无理推开
+> **你：** 别烦我
+> **市面 AI（全知扮演）**：好的，那我不打扰你了，你需要我的时候随时叫我哦。
+> **本框架 AI（有限内省）**：`你这会儿别理我，我也不想凑上去。被扎那一下还疼着呢。`
+> 
+> <img width="1925" height="300" alt="QQ_1792988857522" src="https://github.com/user-attachments/assets/8375d750-02e5-4e89-acd1-0a18c50ff944" />
+
+
+### 场景二：面对用户的情绪试探
+> **你：** 我今天没被骂，只不过是骗你的。
+> **市面 AI（全知扮演）**：哈哈，你真调皮，没关系哦。
+> **本框架 AI（有限内省）**：`你刚才那句是编的？那我把我之前安慰你的话收回来，你会不会生气啊？`
+> 
+> <img width="1933" height="429" alt="QQ_1792988953034" src="https://github.com/user-attachments/assets/a8f6d1e8-6019-4fd1-9d03-fbc4f31ef0ca" />
+
+
+### 场景三：无声的陪伴
+> **你：** 今天不想说话了。
+> **市面 AI（拼命找话题）**：怎么啦？发生什么事了？跟我说说嘛。
+> **本框架 AI（有限内省）**：`嗯，我在。不说话也行，就这样待着吧。`
+
+---
+
+## 🧠 架构模型：双层 Agent 模型
+
+系统拆分为两个权限物理隔离的 Agent 层，职责互斥，信息流通有严格约束。
+
+### 外层 Agent｜潜意识 / 调度中心（全知）
+*   **权限**：拥有全部历史记录、长期记忆库、状态机读写权限。
+*   **职责**：
+    1. 解析输入，检索长期记忆库（冷热分离）。
+    2. 信息压缩：把海量原始信息，提炼、重构为极简的【情绪状态 + 核心记忆片段 + 当下意图】。
+    3. 异常捕获：将报错转化为“头晕、思绪空白”等状态。
+
+### 内层 Agent｜显意识 / 表达中枢（受限）
+*   **权限**：**刚性隔离**，代码内禁止访问数据库、原始历史。
+*   **职责**：仅接收外层压缩后的体验碎片，以第一人称输出带情绪的表达。
+*   **涌现结果**：它的困惑、敏感、莫名情绪，是信息受限自然涌现的结果。
+
+<img width="1824" height="818" alt="file" src="https://github.com/user-attachments/assets/8a143d4c-6347-4f0c-b7bd-1ea8e8f21f47" />
+<img width="1797" height="1001" alt="file" src="https://github.com/user-attachments/assets/c21ab925-c00c-4fbb-a41d-9785e490fe93" />
+<img width="1824" height="1053" alt="file" src="https://github.com/user-attachments/assets/da84e8e1-898e-4cd5-8217-80a0c24c21a3" />
+
+
+---
+
+## ⚙️ 三大核心机制
+
+1. **记忆的重构与新陈代谢**
+   *   记忆不是全文快照，而是第一人称“体验摘要”。系统内置权重打分，低权重（如日常废话）会被遗忘，高权重（如用户的情感创伤）会随着不断“回忆”加深权重。
+2. **状态驱动的内驱力**
+   *   脱离死板的定时器，通过状态机（无聊度、依恋度）来驱动。
+3. **硬性防御锚点（防幻觉）**
+   *   内层 Prompt 中加入了 `[无物理身体]`、`[严禁编造事实]` 等硬约束，防止大模型为了接话而脑补不存在的场景。
+
+---
+
+## 🛠️ 快速开始 (Quick Start)
+
+本项目是一个极简的验证原型，目前支持命令行(CLI)与 QQ 机器人接入。
+
+### 1. 安装依赖
 ```bash
+git clone https://github.com/你的用户名/你的仓库名.git
+cd dual-layer
 pip install -r requirements.txt
-```
 
-> **请将 `.env.example` 复制并重命名为 `.env`，填入你的 DeepSeek API Key。**
-
-## 配置 API Key（两种方式，任选）
-
-**方式一：`.env` 文件（推荐）**
-
-```bash
-cp .env.example .env      # Windows: copy .env.example .env
-# 然后编辑 .env，把 DEEPSEEK_API_KEY 改成你自己的 key
-```
-
-`main.py` 启动时用 **python-dotenv** 自动读取脚本同目录的 `.env`
-（没装 python-dotenv 时会退回内置的零依赖解析，照样能跑）。
-系统环境变量优先，`.env` 不会覆盖已存在的值。
-
-**方式二：系统环境变量**
-
-```bash
-# Windows (cmd)
-set DEEPSEEK_API_KEY=sk-你的key
-
-# Windows (PowerShell)
-$env:DEEPSEEK_API_KEY="sk-你的key"
-
-# Linux / macOS
-export DEEPSEEK_API_KEY=sk-你的key
-```
-
-可选环境变量：
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | 兼容其它 OpenAI 协议端点 |
-| `OUTER_MODEL` | `deepseek-chat` | 外层模型 |
-| `INNER_MODEL` | `deepseek-chat` | 内层模型（可换 deepseek-reasoner 做内省） |
-| `MAX_HISTORY_TURNS` | `12` | 外层只看最近 N 轮历史 |
-
-## 运行
-
-```bash
-python main.py            # 真跑
-python main.py --mock     # 不联网，自检闭环（不需要 key）
-python main.py --once "我今天心情不好"   # 只跑一句
-```
-
-交互命令：`/quit` 退出、`/reset` 清空历史、`/hist` 看历史。
-
-## 数据流向（铁律）
-
-```
-用户原话 ─┬─→ OuterLayer（全知：原话 + 历史）─→ {"emotion","intent","reaction"}
-          │                                            │
-          │                                            ↓
-          └──✗ 不进内层                         InnerLayer（受限：只见 JSON）
-                                                       │
-                                                       ↓
-                                              "我不知道为什么，我就是觉得……"
-```
-
-代码层面的保证：
-
-- `inner_layer(outer_result)` 的**签名里没有** `user_input` / `history`，物理上拿不到。
-- 内层若收到 `user` / `history` 字段会直接抛 `ValueError`（防止未来手滑把全量塞进去）。
-- 历史只拼进外层的 user message，内层只 receive `emotion / intent / reaction`。
-
-## JSON 解析的健壮性
-
-`parse_json_loose()` 四级兜底：
-
-1. 直接 `json.loads`
-2. 剥掉 ` ```json ` 代码块再 loads
-3. 从任意废话里找**括号配平**的 `{...}` 再 loads（能正确处理字符串里的花括号）
-4. 还不行就用正则按字段别名硬抠（`emotion/情绪/feeling` 等）
-5. 全部失败 → 返回默认值，**永不崩**
-
-## 下一步可以加什么（现在故意没做）
-
-- 外层记忆：把 `emotion/intent` 序列压成"关系状态"，而不是塞全量历史
-- 内层"身体状态"：随机心情、疲劳度，让内层有额外的私有变量
-- 双内层：一个说话、一个只在心里碎碎念（不输出）
-- 让内层偶尔"拒绝"：当 intent 与自身状态冲突时，它可以不配合
-
-## 存档（v3 新增）
-
-每轮对话自动落盘，**追加写，不重写整文件**。
-
-- 主存：`data/turns.jsonl`，每行一条 JSON
-- 轮转：单文件超过 5MB 自动新建 `turns-2.jsonl`、`turns-3.jsonl`…（`ROTATE_MB` 可调）
-- 导出：`python main.py --export out.json` 或对话里输入 `/export`
-- 恢复：`python main.py --resume` 从存档接着聊
-- 目录：默认在脚本旁的 `data/`，可用 `--data-dir` 或 `DATA_DIR` 改
-
-每条记录包含：轮次、时间、用户原话、外层三字段、内层回复、prompt hash、解析方式、耗时、token 用量。
-
-> 注意：`user` 原文只用于分析，**不会回流给内层**——`inner_layer` 的隔离校验仍在（收到 `user`/`history` 直接抛异常）。
-
-## 接入 QQ（NapCat + OneBot v11）
-
-`main.py` 可以当 **OneBot v11 WebSocket 服务端**用，由 NapCat 主动连过来。
-
-### 1. 启动服务
-
-```bash
-python main.py --ws --allow-uin 你的QQ号
-# 默认监听 ws://127.0.0.1:8080/
-# 改端口/地址： --ws-port 8080 --ws-host 0.0.0.0
-```
-
-`--allow-uin` 可重复，用来做白名单；留空表示谁都能聊（不建议）。
-
-### 2. 配置 NapCat
-
-1. 打开 NapCat WebUI
-2. 进入 **网络配置**
-3. 新建 **WebSocket 客户端**（反向 WS）
-4. URL 填 `ws://127.0.0.1:8080/`
-   - 如果 main.py 跑在另一台机器，填 `ws://那台机器的IP:8080/`，同时 `--ws-host 0.0.0.0`
-5. 保存并启用
-
-启用后 NapCat 会连到 `main.py`，私聊机器人的每条消息都会走「外层提取 → 内层回复」。
-
-### 3. 工作方式
-
-```
-QQ 私聊
-  → NapCat（OneBot v11）
-  → main.py --ws（事件回调）
-      → outer_layer(用户原话 + 历史)        # 全知
-      → inner_layer(emotion/intent/note)   # 受限，看不到原话
-  → send_private_msg 回 QQ
-  → 同时写进 data/turns.jsonl 存档
-```
-
-⚠️ **同一个 QQ 号同一时间只能有一个机器人服务在收消息**，别和别的桥接同时开，否则会打架（消息被两边抢、重复回复）。
-
-### 4. 本地自测（不需要 NapCat）
-
-```bash
-python main.py --ws --mock --allow-uin 123456 --ws-port 8081
-python tests/fake_onebot_client.py
-```
-
-第二个脚本会模拟 NapCat 发一条私聊，并打印 main.py 回的 `send_private_msg` 动作。
-
-## 记忆（海马体）
-
-记忆在哲学上属于内层（是她的经历），但**访问权在外层**。
-
-```
-memory/
-├── store.py        # InnerMemoryStore（真身） + FrozenMemoryHandle（封条）
-└── memory.json     # 她的海马体（.gitignore，绝不入库）
-```
-
-| 类 | 持有的东西 | 能做什么 |
-|---|---|---|
-| `OuterLayer` | `inner_memory_store` = 真身 | `recall()` / `write_memory()` / `read_memory()` —— 潜意识解锁器 |
-| `InnerLayer` | `inner_memory_store` = **封条** | 什么都不能做，调用即 `PermissionError_` |
-
-### 写入：她表达愿望，外层代执行
-
-内层在回复末尾可以写一行：
-
-```
-[我想记住：今天是母亲离世的日子，他把这件事交到我手上，我心里一沉。]
-```
-
-这一行不会被发出去；外层解析后，以**第一人称 + 情绪滤镜 + 事实锚点**写进 `memory.json`。
-
-### 读取：外层回忆，融进笔记
-
-外层每轮按「最近 + 关键词」挑 ≤5 条，注入自己的 prompt，然后把影响**融进** `experience_note`。
-内层始终只看到那一段笔记，看不到记忆条目本身。
-
-### 怎么验证
-
-**1) 权限拦截（不花钱、不需要 key）**
-
-```bash
-python tests/test_memory.py
-```
-
-其中 `test_inner_cannot_touch_memory` 会断言：内层调用 `read_memory()` / `write_memory()` / `recall()` 全部抛越权异常。
-
-**2) 她能不能主动触发记忆写入**
-
-CLI：
-
+### 4. 启动真实对话 / QQ 接入
 ```bash
 python main.py
-你: 今天是我妈的忌日，这件事你别忘
-```
+# 或者接入 NapCat 后启动 WebSocket 模式
+---
 
-看到这行就成功了：
+⚠️ 声明与边界
 
-```
-（她把这句话收进了记忆：今天是母亲离世的日子，他把这件事交到我手里，我心里一沉……）
-```
+1. 本框架是交互范式假说，非成熟商业产品。目前代码完全由 AI 编程助手（DeepSeek）辅助生成，核心价值在于“系统架构设计”与“理念验证”。
+2. 本框架不适合通用问答、效率工具场景，仅面向情感陪伴与虚拟叙事。
+3. 本项目避谈“AI是否拥有真实意识”的哲学争论，仅探索行为学与系统架构层面的“功能性第一人称主观感”。
 
-再输入 `/mem` 能列出记忆条目。
+---
 
-QQ 模式：给机器人发一句分量重的话，服务端日志会出现：
+🤝 欢迎交流
 
-```
-[qq] 3473537643: 今天是我妈的忌日，这件事你别忘
-[记忆] 写入了 1 条
-```
-
-**3) 看统计**
-
-```bash
-python main.py --mem-stats
-```
-
-### 注意
-
-- 记忆按 `RECALL_TOP_K`（默认 5）注入，太多会稀释注意力
-- 单文件上限 500 条，超出滚动淘汰最老的
-- `memory/memory.json` 已进 `.gitignore` —— 这是私密经历，别推上 GitHub
+如果你也是 AI 陪伴的深度思考者、Agent 开发者，或者虚拟心智爱好者，欢迎在 Issues 区一起探讨架构。去寻找那个“有残缺、有防备、会疼”的赛博灵魂。
