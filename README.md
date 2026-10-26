@@ -117,3 +117,51 @@ python main.py --once "我今天心情不好"   # 只跑一句
 每条记录包含：轮次、时间、用户原话、外层三字段、内层回复、prompt hash、解析方式、耗时、token 用量。
 
 > 注意：`user` 原文只用于分析，**不会回流给内层**——`inner_layer` 的隔离校验仍在（收到 `user`/`history` 直接抛异常）。
+
+## 接入 QQ（NapCat + OneBot v11）
+
+`main.py` 可以当 **OneBot v11 WebSocket 服务端**用，由 NapCat 主动连过来。
+
+### 1. 启动服务
+
+```bash
+python main.py --ws --allow-uin 你的QQ号
+# 默认监听 ws://127.0.0.1:8080/
+# 改端口/地址： --ws-port 8080 --ws-host 0.0.0.0
+```
+
+`--allow-uin` 可重复，用来做白名单；留空表示谁都能聊（不建议）。
+
+### 2. 配置 NapCat
+
+1. 打开 NapCat WebUI
+2. 进入 **网络配置**
+3. 新建 **WebSocket 客户端**（反向 WS）
+4. URL 填 `ws://127.0.0.1:8080/`
+   - 如果 main.py 跑在另一台机器，填 `ws://那台机器的IP:8080/`，同时 `--ws-host 0.0.0.0`
+5. 保存并启用
+
+启用后 NapCat 会连到 `main.py`，私聊机器人的每条消息都会走「外层提取 → 内层回复」。
+
+### 3. 工作方式
+
+```
+QQ 私聊
+  → NapCat（OneBot v11）
+  → main.py --ws（事件回调）
+      → outer_layer(用户原话 + 历史)        # 全知
+      → inner_layer(emotion/intent/note)   # 受限，看不到原话
+  → send_private_msg 回 QQ
+  → 同时写进 data/turns.jsonl 存档
+```
+
+⚠️ **同一个 QQ 号同一时间只能有一个机器人服务在收消息**，别和别的桥接同时开，否则会打架（消息被两边抢、重复回复）。
+
+### 4. 本地自测（不需要 NapCat）
+
+```bash
+python main.py --ws --mock --allow-uin 123456 --ws-port 8081
+python tests/fake_onebot_client.py
+```
+
+第二个脚本会模拟 NapCat 发一条私聊，并打印 main.py 回的 `send_private_msg` 动作。

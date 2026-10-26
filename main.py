@@ -26,6 +26,7 @@ v3 变更（相对 v2）：
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -558,6 +559,143 @@ def build_session_meta(session_id: str) -> Dict[str, Any]:
     }
 
 
+# ─────────────────────── OneBot v11 WebSocket 服务端（NapCat 反连）───────────────────────
+
+QQ_HELP = """QQ 接入说明（NapCat 反向 WebSocket）
+1. 启动本服务： python main.py --ws --allow-uin 你的QQ号
+2. 打开 NapCat WebUI -> 网络配置 -> 新建 WebSocket 客户端
+   URL 填： ws://127.0.0.1:8080/    （本机）；跨机器填 ws://你的IP:8080/
+3. 保存并启用，然后给机器人发私聊即可
+
+注意：同一个 QQ 号只能有一个机器人服务在收消息，别和别的桥接同时开。
+"""
+
+
+def extract_qq_text(message):
+    """从 OneBot 消息段里取纯文本。"""
+    if isinstance(message, str):
+        return message.strip()
+    if isinstance(message, list):
+        parts = []
+        for seg in message:
+            if not isinstance(seg, dict):
+                continue
+            seg_type = seg.get("type")
+            data = seg.get("data") or {}
+            if seg_type == "text":
+                parts.append(str(data.get("text", "")))
+            elif seg_type == "image":
+                parts.append("[图片]")
+            elif seg_type == "face":
+                parts.append("[表情]")
+        return "".join(parts).strip()
+    return ""
+
+
+class QQSession:
+    """每个 QQ 用户一份内存历史 + 落盘。"""
+
+    def __init__(self, store):
+        self.store = store
+        self.histories = {}
+
+    def history(self, uid):
+        return self.histories.setdefault(uid, [])
+
+    def record(self, uid, user_text, outer, reply, mode, usage):
+        hist = self.history(uid)
+        rec = {
+            "i": len(hist) + 1,
+            "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+            "source": "qq",
+            "qq": uid,
+            "user": user_text,
+            "outer": outer,
+            "inner": {"reply": reply, "prompt_hash": prompt_hash(INNER_SYSTEM_TEMPLATE)},
+            "meta": {"parse_mode": mode, "usage": usage},
+        }
+        try:
+            self.store.append(rec)
+        except Exception as e:  # noqa: BLE001
+            print(f"[存档失败] {e}")
+        hist.append({"user": user_text, "ai": reply,
+                     "outer": f"{outer.get('emotion')} / {outer.get('intent')}"})
+
+
+async def _onebot_handler(ws, allow_uins, session, mock=False):
+    peer = getattr(ws, "remote_address", None)
+    print(f"[ws] NapCat 已连接 {peer}")
+    try:
+        async for raw in ws:
+            try:
+                evt = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+
+            if evt.get("post_type") != "message":
+                continue
+            if evt.get("message_type") != "private":
+                print(f"[ws] 忽略非私聊消息: {evt.get('message_type')}")
+                continue
+
+            uid = str(evt.get("user_id", ""))
+            if allow_uins and uid not in allow_uins:
+                print(f"[ws] 不在白名单，忽略 {uid}")
+                continue
+
+            text = extract_qq_text(evt.get("message")) or str(evt.get("raw_message") or "").strip()
+            if not text:
+                continue
+
+            print(f"[qq] {uid}: {text}")
+            try:
+                outer, mode, o_usage, _ = outer_layer(text, session.history(uid), mock=mock)
+                payload = {k: outer[k] for k in FIELDS if k in outer}
+                reply, i_usage, _ = inner_layer(payload, mock=mock)
+            except Exception as e:  # noqa: BLE001
+                reply = f"（我这边出错了：{e}）"
+                mode, o_usage, i_usage = "error", {}, {}
+                print(f"[错误] {e}")
+
+            print(f"[qq] -> {uid}: {reply}")
+            session.record(uid, text, payload if "payload" in dir() else {}, reply, mode,
+                           {"outer": o_usage, "inner": i_usage})
+
+            try:
+                await ws.send(json.dumps({
+                    "action": "send_private_msg",
+                    "params": {
+                        "user_id": int(uid) if uid.isdigit() else uid,
+                        "message": [{"type": "text", "data": {"text": reply}}],
+                    },
+                    "echo": str(evt.get("message_id", "")),
+                }, ensure_ascii=False))
+            except Exception as e:  # noqa: BLE001
+                print(f"[ws] 发送失败: {e}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[ws] 连接异常: {e}")
+    finally:
+        print(f"[ws] NapCat 断开 {peer}")
+
+
+async def run_ws_server(host, port, allow_uins, store, mock=False):
+    try:
+        import websockets
+    except ImportError:
+        print("缺少 websockets 库，先运行：pip install websockets")
+        return 1
+
+    async def handler(ws, path=None):
+        await _onebot_handler(ws, allow_uins, QQSession(store), mock=mock)
+
+    async with websockets.serve(handler, host, port, ping_interval=30, ping_timeout=60):
+        print(f"OneBot v11 WebSocket 服务已启动： ws://{host}:{port}/")
+        print(f"白名单： {allow_uins or '（空 = 所有人都能聊，慎用）'}")
+        print("等待 NapCat 连接…（Ctrl+C 退出）\n")
+        await asyncio.Future()
+
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="双层 Agent 心智框架（最简 CLI）")
     ap.add_argument("--mock", action="store_true", help="不调模型，用假数据跑通闭环")
@@ -565,10 +703,23 @@ def main() -> int:
     ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help=f"存档目录（默认 {DEFAULT_DATA_DIR}）")
     ap.add_argument("--resume", action="store_true", help="从存档恢复历史，接着上次聊")
     ap.add_argument("--export", metavar="OUT.json", default=None, help="导出完整 JSON 后退出")
+    ap.add_argument("--ws", action="store_true", help="以 OneBot v11 WebSocket 服务端模式运行（接 NapCat）")
+    ap.add_argument("--ws-host", default="127.0.0.1", help="WS 监听地址（默认 127.0.0.1）")
+    ap.add_argument("--ws-port", type=int, default=8080, help="WS 监听端口（默认 8080）")
+    ap.add_argument("--allow-uin", action="append", default=[], help="允许的 QQ 号，可重复")
     args = ap.parse_args()
 
     session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     store = TurnStore(args.data_dir, build_session_meta(session_id))
+
+    # ── WS 模式：OneBot v11 服务端 ──
+    if args.ws:
+        print(QQ_HELP)
+        try:
+            return asyncio.run(run_ws_server(args.ws_host, args.ws_port, args.allow_uin, store, mock=args.mock))
+        except KeyboardInterrupt:
+            print("\n已退出。")
+            return 0
 
     # ── 导出模式：只读存档，不启动对话 ──
     if args.export:
