@@ -1,0 +1,36 @@
+# ── 密钥与本地配置（绝对不能提交）──
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials*
+secrets.*
+
+# ── 运行时数据（含真实对话内容，属于隐私）──
+data/
+*.jsonl
+export*.json
+session-*.json
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ── 编辑器 / 系统 ──
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 日志 ──
+*.log
+
+# ── 旧版备份（本地留档，不进仓库）──
+backup/
