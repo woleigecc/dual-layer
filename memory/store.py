@@ -1,34 +1,62 @@
 # -*- coding: utf-8 -*-
-"""内层的海马体：记忆归她所有，但她没有访问权。
+"""内层的海马体 v2：带权重的记忆新陈代谢。
 
-设计要点（对应「硅基初步主观性」）：
-- InnerMemoryStore 是记忆的真身，只有 OuterLayer（潜意识解锁器）持有。
-- InnerLayer 初始化时拿到的是 FrozenMemoryHandle（封条）：
-  持有引用、表达归属，但任何查询/写入都会抛 PermissionError。
-- 记忆条目用第一人称 + 情绪滤镜写，保留事实锚点，不是键值对数据库。
+哲学不变：记忆归内层（她的经历），访问权在外层（潜意识解锁器）。
+工程新增：
+- 每条记忆带 weight（1.0~5.0）与 last_accessed
+- 被想起 -> 权重 +0.1（上限 5.0），模拟"越回忆越深刻"
+- 超过容量 -> 按权重/时间淘汰最弱的，但 weight>=4.5 的永不删
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.json")
 
+MAX_ENTRIES = 50          # 触发清理的容量上限
+PROTECTED_WEIGHT = 4.5    # 达到这个权重永不自动删除
+RECALL_MIN_WEIGHT = 1.5   # 低于这个权重不参与回忆
+REWARD_STEP = 0.1         # 每被想起一次 +0.1
+MAX_WEIGHT = 5.0
+DEFAULT_WEIGHT = 3.0
+
 
 class PermissionError_(Exception):
-    """内层越权访问记忆时抛出（继承 Exception，命名独立避免和内置混淆）。"""
+    """内层越权访问记忆时抛出。"""
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def _parse_iso(s: str) -> float:
+    """把 ISO 时间戳转成可比较的浮点；解析失败返回 0（视为最旧）。"""
+    if not s:
+        return 0.0
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return time.mktime(time.strptime(s, fmt))
+        except ValueError:
+            continue
+    return 0.0
+
+
+def _clamp_weight(w: Any) -> float:
+    try:
+        v = float(w)
+    except (TypeError, ValueError):
+        return DEFAULT_WEIGHT
+    return max(1.0, min(MAX_WEIGHT, round(v, 2)))
 
 
 class FrozenMemoryHandle:
-    """内层的「记忆引用」——只有归属，没有权限。
-
-    所有接口调用一律抛越权异常；用于在代码层面把"她不能查记忆"表达出来。
-    """
+    """内层的「记忆引用」——只有归属，没有权限。"""
 
     __slots__ = ("_owner", "_path")
 
@@ -36,7 +64,6 @@ class FrozenMemoryHandle:
         object.__setattr__(self, "_owner", owner)
         object.__setattr__(self, "_path", path)
 
-    # 显式列出被禁止的接口，方便阅读与报错
     def read_memory(self, *a, **k):
         raise PermissionError_(
             "内层的记忆属于你，但此刻没有访问权：read_memory() 只能由外层（潜意识解锁器）调用"
@@ -63,31 +90,19 @@ class FrozenMemoryHandle:
         return f"<FrozenMemoryHandle owner={self._owner!r} path={self._path!r} 无访问权>"
 
 
-
-def _query_tokens(q: str) -> list:
-    """把查询切成可匹配的碎片：中文用 2-gram 滑窗，英文按词。"""
-    tokens = set()
-    for run in re.findall(r"[\u4e00-\u9fa5]+", q or ""):
-        if len(run) <= 2:
-            tokens.add(run)
-        else:
-            for i in range(len(run) - 1):
-                tokens.add(run[i : i + 2])
-    for w in re.findall(r"[a-zA-Z]{3,}", q or ""):
-        tokens.add(w.lower())
-    return [t for t in tokens if t]
 class InnerMemoryStore:
-    """记忆真身。**只允许 OuterLayer 持有并调度。**"""
+    """记忆真身（v2：带权重）。**只允许 OuterLayer 持有并调度。**"""
 
-    def __init__(self, path: Optional[str] = None):
+    def __init__(self, path: Optional[str] = None, capacity: int = MAX_ENTRIES):
         self.path = os.path.abspath(path or DEFAULT_PATH)
+        self.capacity = capacity
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         if not os.path.exists(self.path):
-            self._save({"version": 1, "entries": []})
+            self._save({"version": 2, "entries": []})
 
-    # ── 底层 IO（原子写，避免半截文件） ──
+    # ── 底层 IO ──
 
-    def _load(self) -> Dict[str, Any]:
+    def _load_raw(self) -> Dict[str, Any]:
         try:
             with open(self.path, "r", encoding="utf-8") as fp:
                 data = json.load(fp)
@@ -95,7 +110,7 @@ class InnerMemoryStore:
                 raise ValueError("bad shape")
             return data
         except (OSError, json.JSONDecodeError, ValueError):
-            return {"version": 1, "entries": []}
+            return {"version": 2, "entries": []}
 
     def _save(self, data: Dict[str, Any]) -> None:
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self.path), suffix=".tmp")
@@ -110,66 +125,141 @@ class InnerMemoryStore:
                 except OSError:
                     pass
 
-    # ── 外层专用接口 ──
+    # ── 迁移：v1(text/ts/anchor) -> v2(content/timestamp/weight/last_accessed) ──
+
+    def _migrate(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        if "content" in entry:
+            out = dict(entry)
+        else:
+            ts = entry.get("ts") or entry.get("date") or _now_iso()
+            out = {
+                "id": entry.get("id") or uuid.uuid4().hex[:12],
+                "content": entry.get("text") or "",
+                "timestamp": ts,
+                "weight": _clamp_weight(entry.get("weight", DEFAULT_WEIGHT)),
+                "last_accessed": entry.get("last_accessed") or ts,
+            }
+            if entry.get("anchor"):
+                out["anchor"] = entry["anchor"]
+            out["source"] = entry.get("source", "legacy_v1")
+        out["weight"] = _clamp_weight(out.get("weight", DEFAULT_WEIGHT))
+        out.setdefault("last_accessed", out.get("timestamp", _now_iso()))
+        out.setdefault("timestamp", out.get("last_accessed", _now_iso()))
+        out.setdefault("id", uuid.uuid4().hex[:12])
+        return out
 
     def entries(self) -> List[Dict[str, Any]]:
-        return self._load().get("entries", [])
+        raw = self._load_raw()
+        return [self._migrate(e) for e in raw.get("entries", [])]
 
     def read_memory(self) -> List[Dict[str, Any]]:
-        """读出全部记忆（外层在分析前调用）。"""
         return self.entries()
 
-    def write_memory(self, text: str, anchor: str = "", source: str = "inner_wish") -> Optional[Dict[str, Any]]:
-        """把一句第一人称的记忆写入海马体。text 是她的原话，anchor 是事实锚点。"""
-        text = (text or "").strip()
-        if not text:
+    # ── 写入 ──
+
+    def write_memory(
+        self,
+        content: str,
+        anchor: str = "",
+        source: str = "inner_wish",
+        weight: float = DEFAULT_WEIGHT,
+    ) -> Optional[Dict[str, Any]]:
+        content = (content or "").strip()
+        if not content:
             return None
-        data = self._load()
-        entries = data.get("entries", [])
-        # 去重：同一句话不重复记
-        for e in entries:
-            if e.get("text") == text:
+        all_entries = self.entries()
+        # 去重：同一句话不重复记（权重取较高者）
+        for e in all_entries:
+            if e.get("content") == content:
+                e["weight"] = max(e["weight"], _clamp_weight(weight))
+                e["last_accessed"] = _now_iso()
+                self._save({"version": 2, "entries": all_entries})
                 return e
+
+        now = _now_iso()
         entry = {
-            "id": f"m{int(time.time() * 1000)}",
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "date": time.strftime("%Y-%m-%d"),
-            "text": text,
-            "anchor": (anchor or "").strip()[:160],
+            "id": uuid.uuid4().hex[:12],
+            "content": content,
+            "timestamp": now,
+            "weight": _clamp_weight(weight),
+            "last_accessed": now,
             "source": source,
         }
-        entries.append(entry)
-        data["entries"] = entries[-500:]  # 硬上限，防止无限膨胀
-        self._save(data)
+        if anchor:
+            entry["anchor"] = anchor.strip()[:160]
+        all_entries.append(entry)
+        all_entries = self._evict(all_entries)
+        self._save({"version": 2, "entries": all_entries})
         return entry
 
-    def recall(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
-        """按「最近 + 关键词命中」挑 <=k 条。"""
-        entries = self._load().get("entries", [])
-        if not entries:
+    # ── 淘汰 ──
+
+    def _evict(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """超过容量时按「权重最低 + 最久没想起」淘汰，weight>=4.5 永不删。"""
+        if len(entries) <= self.capacity:
+            return entries
+
+        def sort_key(e: Dict[str, Any]):
+            return (e.get("weight", DEFAULT_WEIGHT), _parse_iso(e.get("last_accessed", "")))
+
+        ordered = sorted(entries, key=sort_key)  # 弱的在前
+        keep = []
+        removed = 0
+        need = len(entries) - self.capacity
+        for e in ordered:
+            if removed < need and e.get("weight", DEFAULT_WEIGHT) < PROTECTED_WEIGHT:
+                removed += 1
+                continue
+            keep.append(e)
+        # 受保护条目太多、删不够时保持原样（宁可超一点，也不删核心记忆）
+        return keep
+
+    # ── 回忆（含权重奖励）──
+
+    def recall(self, query: str = "", k: int = 5, reward: bool = True) -> List[Dict[str, Any]]:
+        """
+        过滤 weight < 1.5，按 weight 降序 + last_accessed 降序取前 k 条。
+        被取出的记忆：last_accessed = now，weight += 0.1（上限 5.0）。
+        """
+        all_entries = self.entries()
+        candidates = [e for e in all_entries if e.get("weight", 0) >= RECALL_MIN_WEIGHT]
+        if not candidates:
             return []
-        q = (query or "").strip()
-        tokens = _query_tokens(q)
 
-        def score(e: Dict[str, Any], idx: int) -> float:
-            hay = f"{e.get('text', '')} {e.get('anchor', '')}"
-            hit = sum(1 for t in tokens if t in hay)
-            recency = idx / max(len(entries) - 1, 1)  # 越新越高
-            return hit * 2.0 + recency
-
-        ranked = sorted(
-            enumerate(entries), key=lambda pair: score(pair[1], pair[0]), reverse=True
+        candidates.sort(
+            key=lambda e: (e.get("weight", 0), _parse_iso(e.get("last_accessed", ""))),
+            reverse=True,
         )
-        picked = [e for _i, e in ranked[:k]]
-        # 保持时间顺序（老的在前），读起来像回忆
-        picked.sort(key=lambda e: e.get("ts", ""))
+        picked = candidates[: max(int(k), 0)]
+
+        if reward and picked:
+            now = _now_iso()
+            for e in picked:
+                e["last_accessed"] = now
+                e["weight"] = _clamp_weight(min(MAX_WEIGHT, e.get("weight", 0) + REWARD_STEP))
+            self._save({"version": 2, "entries": all_entries})
+
         return picked
 
+    # ── 统计 ──
+
     def stats(self) -> Dict[str, Any]:
-        entries = self._load().get("entries", [])
-        return {"count": len(entries), "path": self.path,
-                "first": entries[0]["date"] if entries else None,
-                "last": entries[-1]["date"] if entries else None}
+        entries = self.entries()
+        if not entries:
+            return {"count": 0, "avg_weight": 0.0, "max_weight": 0.0, "top": [], "path": self.path}
+        weights = [e.get("weight", DEFAULT_WEIGHT) for e in entries]
+        top = sorted(entries, key=lambda e: e.get("weight", 0), reverse=True)[:3]
+        return {
+            "count": len(entries),
+            "avg_weight": round(sum(weights) / len(weights), 2),
+            "max_weight": max(weights),
+            "capacity": self.capacity,
+            "top": [
+                {"weight": e.get("weight"), "content": e.get("content"), "when": e.get("timestamp")}
+                for e in top
+            ],
+            "path": self.path,
+        }
 
     # ── 给内层的封条 ──
 
@@ -178,11 +268,13 @@ class InnerMemoryStore:
 
 
 def format_recall(entries: List[Dict[str, Any]]) -> str:
-    """把回忆条目拼成给外层看的文本。"""
+    """把回忆条目拼成给外层看的文本（带权重，便于它判断分量）。"""
     if not entries:
         return ""
     lines = []
     for e in entries:
+        w = e.get("weight", DEFAULT_WEIGHT)
+        when = (e.get("timestamp") or "")[:10]
         anchor = f"（{e['anchor']}）" if e.get("anchor") else ""
-        lines.append(f"- {e.get('date', '')} {e.get('text', '')}{anchor}")
+        lines.append(f"- [{w:.1f}] {when} {e.get('content', '')}{anchor}")
     return "\n".join(lines)

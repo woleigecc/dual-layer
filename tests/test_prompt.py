@@ -47,6 +47,15 @@ def test_metaphor_boundary_defined():
     assert "摔门" in p
 
 
+def test_outer_scores_memory_weight():
+    """外层必须给记忆打分（1.0~5.0），且写清三档标准。"""
+    p = main.OUTER_SYSTEM
+    assert "memory_weight" in p
+    assert "1.0 ~ 5.0" in p or "1.0~5.0" in p
+    assert "5.0" in p and "3.0" in p and "1.0" in p
+    assert "永不遗忘" in p
+
+
 def _run_all():
     funcs = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

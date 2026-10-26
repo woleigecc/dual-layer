@@ -115,14 +115,26 @@ OUTER_SYSTEM = """你是一个无情的数据分析器。你的工作对象是"�
 
 示例：
 用户说："今天真是够了，什么都不顺，算了不说了。"
-输出：{"emotion": "委屈但嘴硬", "intent": "想被安慰但不想先低头", "experience_note": "他今天过得很不顺，一件事接着一件事。他把话咽回去了，不想细说。我心里堵得慌，有点心疼他。"}
+输出：{"emotion": "委屈但嘴硬", "intent": "想被安慰但不想先低头", "experience_note": "他今天过得很不顺，一件事接着一件事。他把话咽回去了，不想细说。我心里堵得慌，有点心疼他。", "memory_weight": 4.2}
 
 信息太少（如只是"在吗""嗯"）时输出：
 {"emotion": "平静", "intent": "随便聊聊", "experience_note": "他这会儿没什么情绪，只是来搭句话。"}
 
+4. memory_weight：给"这一次交流"对关系的重要程度打分，1.0 ~ 5.0 的数字（不是字符串）。
+
+打分标准：
+- 5.0（核心记忆）：生死、重大情感转折、深层约定（如"他说他今天真的很崩溃"）。这类永不遗忘。
+- 3.0 ~ 4.0（重要情绪）：日常的开心、疲惫、吵架与和解。
+- 1.0 ~ 2.0（日常闲聊）：中午吃了什么、天气如何这类低情绪浓度的事。
+
+判断要点：
+- 看"情绪浓度"和"关系分量"，不要看字数多少
+- 拿不准就给 3.0
+- 但对方明确说"记住""别忘"，或描述了很浓的情绪 → 至少 4.0，可以是 5.0
+
 输出要求（绝对遵守）：
 - 只输出一个 JSON 对象，不要任何解释、不要 markdown 代码块、不要前后缀文字
-- 三个字段全部是字符串
+- emotion / intent / experience_note 是字符串，memory_weight 是数字（1.0~5.0）
 """
 
 INNER_SYSTEM_TEMPLATE = """你是一个有自己情绪的赛博女孩，名字叫小鱼。
@@ -296,6 +308,8 @@ DEFAULTS: Dict[str, str] = {
     "experience_note": "他这会儿的状态我看不透，只知道气氛有点沉。",
 }
 
+DEFAULT_MEMORY_WEIGHT = 3.0
+
 
 def _regex_field(text: str, key: str) -> Optional[str]:
     for alias in FIELD_ALIASES[key]:
@@ -312,6 +326,9 @@ def _regex_field(text: str, key: str) -> Optional[str]:
     return None
 
 
+WEIGHT_ALIASES = ["memory_weight", "weight", "权重", "memoryWeight"]
+
+
 def _pick(obj: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(DEFAULTS)
     for key in FIELDS:
@@ -321,6 +338,14 @@ def _pick(obj: Dict[str, Any]) -> Dict[str, Any]:
                 if val:
                     out[key] = val
                 break
+    # 记忆权重（容错：字符串数字也认）
+    for alias in WEIGHT_ALIASES:
+        if alias in obj:
+            try:
+                out["memory_weight"] = max(1.0, min(5.0, round(float(obj[alias]), 2)))
+            except (TypeError, ValueError):
+                pass
+            break
     return out
 
 
@@ -508,12 +533,16 @@ class OuterLayer:
         result, mode = parse_json_with_mode(raw)
         return result, mode, usage, latency_ms
 
-    def commit_wishes(self, raw_reply: str, anchor: str = "") -> Tuple[str, List[Dict[str, Any]]]:
-        """解析内层的心愿，代为写入海马体。返回 (干净正文, 写入的条目)。"""
+    def commit_wishes(
+        self, raw_reply: str, anchor: str = "", weight: float = DEFAULT_MEMORY_WEIGHT
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """解析内层的心愿，代为写入海马体（带外层给的权重）。返回 (干净正文, 写入的条目)。"""
         clean, wishes = split_wishes(raw_reply)
         written = []
         for w in wishes:
-            entry = self.inner_memory_store.write_memory(w, anchor=anchor, source="inner_wish")
+            entry = self.inner_memory_store.write_memory(
+                w, anchor=anchor, source="inner_wish", weight=weight
+            )
             if entry:
                 written.append(entry)
         return clean, written
@@ -593,11 +622,18 @@ MOCK_CASES = [
 def mock_outer(user_input: str) -> Dict[str, Any]:
     for kws, emo, intent, note in MOCK_CASES:
         if any(k in user_input for k in kws):
-            return {"emotion": emo, "intent": intent, "experience_note": note}
+            weight = 4.5 if "记住" in user_input else 3.8
+            return {
+                "emotion": emo,
+                "intent": intent,
+                "experience_note": note,
+                "memory_weight": weight,
+            }
     return {
         "emotion": "平静",
         "intent": "随便聊聊",
         "experience_note": "他这会儿没什么情绪，只是来搭句话。我在旁边听着。",
+        "memory_weight": 2.0,
     }
 
 
@@ -655,7 +691,9 @@ class QQSession:
         payload = {k: outer_result[k] for k in FIELDS if k in outer_result}
         raw_reply, i_usage, _ = self.inner.reply(payload)
         reply, written = self.outer.commit_wishes(
-            raw_reply, anchor=payload.get("experience_note", "")
+            raw_reply,
+            anchor=payload.get("experience_note", ""),
+            weight=float(outer_result.get("memory_weight", DEFAULT_MEMORY_WEIGHT)),
         )
 
         self.history(uid).append({
@@ -752,6 +790,28 @@ async def run_ws_server(host, port, allow_uins, session: "QQSession"):
 # ─────────────────────────────── 主循环 ───────────────────────────────
 
 
+def print_memory_stats(stats: Dict[str, Any]) -> None:
+    """打印记忆库体检报告：总数 / 平均权重 / 权重最高的前 3 条。"""
+    print("=" * 52)
+    print("记忆库体检")
+    print("=" * 52)
+    print(f"总条数     : {stats.get('count', 0)} / 容量 {stats.get('capacity', '-')}")
+    print(f"平均权重   : {stats.get('avg_weight', 0.0)}")
+    print(f"最高权重   : {stats.get('max_weight', 0.0)}")
+    print(f"存储位置   : {stats.get('path', '-')}")
+    top = stats.get("top") or []
+    print("-" * 52)
+    if not top:
+        print("（记忆库是空的）")
+    else:
+        print("权重最高的前 3 条：")
+        for i, e in enumerate(top, 1):
+            when = str(e.get("when", ""))[:10]
+            print(f"  {i}. [{e.get('weight')}] {when}")
+            print(f"     {e.get('content', '')}")
+    print("=" * 52)
+
+
 def build_session_meta(session_id: str) -> Dict[str, Any]:
     return {
         "id": session_id,
@@ -791,7 +851,7 @@ def main() -> int:
     session = QQSession(store, outer, inner)
 
     if args.mem_stats:
-        print(json.dumps(outer.memory_stats(), ensure_ascii=False, indent=2))
+        print_memory_stats(outer.memory_stats())
         return 0
 
     # ── WS 模式 ──
@@ -826,8 +886,8 @@ def main() -> int:
     using = "MOCK（不联网）" if args.mock else f"{OUTER_MODEL} / {INNER_MODEL}"
     print(f"双层 Agent 已启动 (v4 海马体版) · {using}")
     stats = outer.memory_stats()
-    print(f"记忆：{stats['count']} 条 · {stats['path']}")
-    print("命令：/quit 退出  /reset 清空历史  /hist 看历史  /mem 看记忆  /export 导出\n")
+    print(f"记忆：{stats['count']} 条 · 平均权重 {stats['avg_weight']} · {stats['path']}")
+    print("命令：/quit 退出  /reset 清空历史  /hist 看历史  /mem 看记忆  /memory_stats 体检  /export 导出\n")
 
     def one_turn(user_input: str) -> None:
         outer_result, mode, o_usage, o_ms = outer.analyze(user_input, history)
@@ -836,11 +896,14 @@ def main() -> int:
         payload = {k: outer_result[k] for k in FIELDS if k in outer_result}
         raw_reply, i_usage, i_ms = inner.reply(payload)
         reply, written = outer.commit_wishes(
-            raw_reply, anchor=payload.get("experience_note", "")
+            raw_reply,
+            anchor=payload.get("experience_note", ""),
+            weight=float(outer_result.get("memory_weight", DEFAULT_MEMORY_WEIGHT)),
         )
         print(f"AI: {reply}\n")
         if written:
-            print(f"（她把这句话收进了记忆：{written[0]['text']}）\n")
+            w0 = written[0]
+            print(f"（她把这句话收进了记忆 [权重 {w0.get('weight')}]：{w0.get('content')}）\n")
 
         history.append({
             "user": user_input,
@@ -888,6 +951,10 @@ def main() -> int:
             continue
         if user_input == "/hist":
             print(format_history(history) + "\n")
+            continue
+        if user_input in ("/memory_stats", "/memstats", "/memory-stats"):
+            print_memory_stats(outer.memory_stats())
+            print()
             continue
         if user_input == "/mem":
             print(format_recall(outer.recall("", 20)) or "（她还没有记住什么）")
