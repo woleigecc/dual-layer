@@ -18,7 +18,19 @@ dual-layer/
 pip install openai
 ```
 
-## 配置 API Key
+## 配置 API Key（两种方式，任选）
+
+**方式一：`.env` 文件（推荐）**
+
+```bash
+cp .env.example .env      # Windows: copy .env.example .env
+# 然后编辑 .env，把 DEEPSEEK_API_KEY 改成你自己的 key
+```
+
+`main.py` 启动时会自动读脚本同目录的 `.env`（零依赖，不需要 python-dotenv）。
+系统环境变量优先，`.env` 不会覆盖已存在的值。
+
+**方式二：系统环境变量**
 
 ```bash
 # Windows (cmd)

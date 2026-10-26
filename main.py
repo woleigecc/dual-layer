@@ -35,6 +35,34 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+# ─────────────────────── .env 自动加载（零依赖，无需 python-dotenv）───────────────────────
+
+
+def _load_env_file(path: Optional[str] = None) -> None:
+    """
+    从脚本同目录的 .env 读取 KEY=VALUE。
+    规则：已存在的系统环境变量优先，不覆盖；支持 # 注释、引号包裹、utf-8 BOM。
+    """
+    p = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.isfile(p):
+        return
+    try:
+        with open(p, "r", encoding="utf-8-sig") as fp:
+            for line in fp:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except OSError:
+        pass
+
+
+_load_env_file()
+
 # ─────────────────────────────── 配置 ───────────────────────────────
 
 API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
