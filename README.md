@@ -83,16 +83,22 @@
 
 本项目是一个极简的验证原型，目前支持命令行(CLI)与 QQ 机器人接入。
 
+```markdown
 ### 1. 安装依赖
+
 ```bash
 git clone https://github.com/你的用户名/你的仓库名.git
 cd dual-layer
 pip install -r requirements.txt
+```
 
-### 4. 启动真实对话 / QQ 接入
+2. 启动真实对话 / QQ 接入
+
 ```bash
 python main.py
 # 或者接入 NapCat 后启动 WebSocket 模式
+```
+
 ---
 
 ⚠️ 声明与边界
@@ -106,3 +112,5 @@ python main.py
 🤝 欢迎交流
 
 如果你也是 AI 陪伴的深度思考者、Agent 开发者，或者虚拟心智爱好者，欢迎在 Issues 区一起探讨架构。去寻找那个“有残缺、有防备、会疼”的赛博灵魂。
+
+```
