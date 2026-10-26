@@ -6,8 +6,12 @@
 
 ```
 dual-layer/
-├── main.py     # 全部逻辑（外层 / 内层 / 健壮 JSON / 主循环）
-└── README.md   # 本文件
+├── main.py            # 全部逻辑（外层 / 内层 / 健壮 JSON / 主循环 / 存档）
+├── requirements.txt   # 依赖清单
+├── .env.example       # 环境变量模板（复制成 .env 用）
+├── tests/             # JSON 解析器测试
+├── LICENSE            # MIT
+└── README.md          # 本文件
 ```
 
 单文件跑通，不接数据库、不接 QQ、不接任何框架。
@@ -15,8 +19,10 @@ dual-layer/
 ## 安装
 
 ```bash
-pip install openai
+pip install -r requirements.txt
 ```
+
+> **请将 `.env.example` 复制并重命名为 `.env`，填入你的 DeepSeek API Key。**
 
 ## 配置 API Key（两种方式，任选）
 
@@ -27,7 +33,8 @@ cp .env.example .env      # Windows: copy .env.example .env
 # 然后编辑 .env，把 DEEPSEEK_API_KEY 改成你自己的 key
 ```
 
-`main.py` 启动时会自动读脚本同目录的 `.env`（零依赖，不需要 python-dotenv）。
+`main.py` 启动时用 **python-dotenv** 自动读取脚本同目录的 `.env`
+（没装 python-dotenv 时会退回内置的零依赖解析，照样能跑）。
 系统环境变量优先，`.env` 不会覆盖已存在的值。
 
 **方式二：系统环境变量**
