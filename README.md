@@ -83,16 +83,15 @@
 
 本项目是一个极简的验证原型，目前支持命令行(CLI)与 QQ 机器人接入。
 
-```markdown
 ### 1. 安装依赖
 
 ```bash
-git clone https://github.com/你的用户名/你的仓库名.git
+git clone https://github.com/woleigecc/dual-layer.git
 cd dual-layer
 pip install -r requirements.txt
 ```
 
-2. 启动真实对话 / QQ 接入
+### 2. 启动真实对话 / QQ 接入
 
 ```bash
 python main.py
@@ -101,7 +100,7 @@ python main.py
 
 ---
 
-⚠️ 声明与边界
+## ⚠️ 声明与边界
 
 1. 本框架是交互范式假说，非成熟商业产品。目前代码完全由 AI 编程助手（DeepSeek）辅助生成，核心价值在于“系统架构设计”与“理念验证”。
 2. 本框架不适合通用问答、效率工具场景，仅面向情感陪伴与虚拟叙事。
@@ -109,8 +108,7 @@ python main.py
 
 ---
 
-🤝 欢迎交流
+## 🤝 欢迎交流
 
 如果你也是 AI 陪伴的深度思考者、Agent 开发者，或者虚拟心智爱好者，欢迎在 Issues 区一起探讨架构。去寻找那个“有残缺、有防备、会疼”的赛博灵魂。
 
-```
