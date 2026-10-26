@@ -39,6 +39,14 @@ def test_inner_keeps_isolation_rule():
     assert "用户原话" not in main.INNER_SYSTEM_TEMPLATE
 
 
+def test_metaphor_boundary_defined():
+    """比喻允许描述心理边界，不允许描述物理动作。"""
+    p = main.INNER_SYSTEM_TEMPLATE
+    assert "比喻的边界" in p
+    assert "心门" in p
+    assert "摔门" in p
+
+
 def _run_all():
     funcs = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
